@@ -156,6 +156,68 @@
         }
       },
       "response": []
+    },
+    {
+      "name": "Soles a Dolares",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"monto\": 300\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8082/api/exchange-rate/76407603/soles-a-dolares",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8082",
+          "path": [
+            "api",
+            "exchange-rate",
+            "76407603",
+            "soles-a-dolares"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Dolares a Soles",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"monto\": 300\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8082/api/exchange-rate/76407603/soles-a-dolares",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8082",
+          "path": [
+            "api",
+            "exchange-rate",
+            "76407603",
+            "soles-a-dolares"
+          ]
+        }
+      },
+      "response": []
     }
   ]
 }

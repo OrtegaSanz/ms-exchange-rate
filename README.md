@@ -1,9 +1,14 @@
 # ms-exchange-rate
 
 Microservicio construido con [Quarkus](https://quarkus.io/) que expone el tipo de cambio del día
-(consumido desde la API pública `https://free.e-api.net.pe`) y gestiona los clientes autorizados a
-consultarlo. Cada cliente está limitado a **10 consultas por día** (hora de `America/Lima`); las
-consultas se registran en PostgreSQL.
+(consumido desde la API pública `https://free.e-api.net.pe`), gestiona los clientes y les permite
+**cambiar montos de soles a dólares** al tipo de cambio venta del día.
+
+- La **consulta** del tipo de cambio es pública: no requiere cliente, no tiene límite y no se registra.
+- Las **operaciones de cambio** (cuando se ingresa un monto) sí se registran en PostgreSQL junto con
+  el tipo de cambio aplicado. Hay dos sentidos, **soles → dólares** y **dólares → soles**, y ambos
+  comparten el mismo contador: en total **10 operaciones por día** por cliente (día calendario en la
+  zona horaria `America/Lima`).
 
 ---
 
@@ -51,8 +56,8 @@ docker compose up -d
 
 Las tablas se crean automáticamente al iniciar la aplicación:
 
-- `Cliente` → `id`, `nombre`, `apellido`, `dni`
-- `consultas_cambio` → `id`, `cliente_id`, `fecha_acceso`
+- `Cliente` → `id`, `nombre`, `apellido`, `dni` (único)
+- `consultas_cambio` → `id`, `cliente_id`, `fecha_acceso`, `direccion`, `monto_soles`, `monto_dolares`, `tipo_cambio_aplicado`
 
 ---
 
@@ -125,7 +130,9 @@ La aplicación corre en el puerto **8082** (`quarkus.http.port=8082`).
 | **Especificación OpenAPI (JSON/YAML)** | <http://localhost:8082/q/openapi> |
 | **Dev UI de Quarkus** (solo en modo dev) | <http://localhost:8082/q/dev/> |
 | Endpoints de clientes | <http://localhost:8082/api/cliente> |
-| Endpoint de tipo de cambio | <http://localhost:8082/api/exchange-rate/{dni}> |
+| Consulta del tipo de cambio | <http://localhost:8082/api/exchange-rate> |
+| Cambio soles → dólares (POST) | <http://localhost:8082/api/exchange-rate/{dni}/soles-a-dolares> |
+| Cambio dólares → soles (POST) | <http://localhost:8082/api/exchange-rate/{dni}/dolares-a-soles> |
 | PostgreSQL | `localhost:5432` |
 | API externa de tipo de cambio | <https://free.e-api.net.pe/tipo-cambio/today.json> |
 
@@ -285,14 +292,11 @@ Elimina un cliente.
 
 ### Tipo de cambio — `/api/exchange-rate`
 
-#### `GET /api/exchange-rate/{dni}`
+#### `GET /api/exchange-rate`
 
-Devuelve el tipo de cambio del día para un cliente registrado y **registra la consulta**. Cada
-cliente puede realizar hasta **10 consultas diarias** (`CambioService.LIMITE_DIARIO`), contadas
-sobre el día calendario en la zona horaria `America/Lima`. Se ejecuta sobre *virtual threads*
-(`@RunOnVirtualThread`).
-
-**Parámetro de ruta:** `dni` (string) — debe corresponder a un cliente existente.
+Devuelve el tipo de cambio del día tal como lo publica el proveedor externo. **Es público: no
+requiere un cliente registrado, no tiene límite diario y no registra ninguna operación.** Se ejecuta
+sobre *virtual threads* (`@RunOnVirtualThread`).
 
 **Respuesta `200 OK`**
 
@@ -305,20 +309,106 @@ sobre el día calendario en la zona horaria `America/Lima`. Se ejecuta sobre *vi
 }
 ```
 
-**Respuesta `429 Too Many Requests`**
+| Código | Descripción |
+|---|---|
+| `200` | Tipo de cambio del día obtenido correctamente |
+| `503` | El proveedor externo no está disponible o no devolvió un tipo de cambio venta válido |
+
+---
+
+#### `POST /api/exchange-rate/{dni}/soles-a-dolares`
+
+Cambia un monto en **soles a dólares** aplicando el **tipo de cambio venta** del día (el cliente
+compra dólares) y **registra la operación** con el monto y la tasa aplicada.
+
+**Parámetro de ruta:** `dni` (string) — debe corresponder a un cliente registrado.
+
+**Request body**
 
 ```json
 {
-  "mensaje": "Límite diario de consultas alcanzado para el DNI 12345678"
+  "monto": 350.00
+}
+```
+
+**Respuesta `200 OK`** — `montoDestino = monto / venta`, redondeado a 2 decimales (`HALF_UP`)
+
+```json
+{
+  "dni": "12345678",
+  "direccion": "SOLES_A_DOLARES",
+  "montoOrigen": 350.00,
+  "monedaOrigen": "PEN",
+  "montoDestino": 99.43,
+  "monedaDestino": "USD",
+  "tipoCambioAplicado": 3.520,
+  "fechaOperacion": "2026-10-21T16:42:10.512Z",
+  "operacionesRealizadasHoy": 3,
+  "limiteDiario": 10
 }
 ```
 
 | Código | Descripción |
 |---|---|
-| `200` | Tipo de cambio obtenido correctamente (la consulta queda registrada) |
+| `200` | Cambio realizado y registrado correctamente |
+| `400` | El monto a cambiar debe ser mayor a cero (nulo, cero o negativo) |
 | `404` | Cliente no encontrado — `Cliente not found with dni: {dni}` |
-| `429` | Límite diario de 10 consultas alcanzado para el DNI |
-| `500` | Error interno del servidor o fallo al consumir la API externa |
+| `429` | Límite diario de operaciones de cambio alcanzado para el DNI |
+| `503` | El proveedor externo no está disponible o no devolvió un tipo de cambio válido |
+
+---
+
+#### `POST /api/exchange-rate/{dni}/dolares-a-soles`
+
+Cambia un monto en **dólares a soles** aplicando el **tipo de cambio compra** del día (el cliente
+vende dólares) y **registra la operación**. Comparte el mismo contador diario que el sentido
+anterior: las dos direcciones suman hacia el mismo límite de 10 operaciones.
+
+**Parámetro de ruta:** `dni` (string) — debe corresponder a un cliente registrado.
+
+**Request body**
+
+```json
+{
+  "monto": 100.00
+}
+```
+
+**Respuesta `200 OK`** — `montoDestino = monto * compra`, redondeado a 2 decimales (`HALF_UP`)
+
+```json
+{
+  "dni": "12345678",
+  "direccion": "DOLARES_A_SOLES",
+  "montoOrigen": 100.00,
+  "monedaOrigen": "USD",
+  "montoDestino": 350.50,
+  "monedaDestino": "PEN",
+  "tipoCambioAplicado": 3.505,
+  "fechaOperacion": "2026-10-21T16:45:02.118Z",
+  "operacionesRealizadasHoy": 4,
+  "limiteDiario": 10
+}
+```
+
+| Código | Descripción |
+|---|---|
+| `200` | Cambio realizado y registrado correctamente |
+| `400` | El monto a cambiar debe ser mayor a cero (nulo, cero o negativo) |
+| `404` | Cliente no encontrado — `Cliente not found with dni: {dni}` |
+| `429` | Límite diario de operaciones de cambio alcanzado para el DNI |
+| `503` | El proveedor externo no está disponible o no devolvió un tipo de cambio válido |
+
+**Respuesta `429 Too Many Requests`** (igual en ambos sentidos)
+
+```json
+{
+  "message": "Limite diario de 10 operaciones de cambio alcanzado para el DNI 12345678"
+}
+```
+
+> `operacionesRealizadasHoy` cuenta **todas** las operaciones del cliente ese día, en los dos
+> sentidos, incluyendo la que acaba de realizarse.
 
 ---
 
@@ -344,8 +434,18 @@ curl -X PUT http://localhost:8082/api/cliente/1 \
 # Eliminar
 curl -i -X DELETE http://localhost:8082/api/cliente/1
 
-# Consultar el tipo de cambio
-curl -i http://localhost:8082/api/exchange-rate/12345678
+# Consultar el tipo de cambio del día (público, sin límite)
+curl http://localhost:8082/api/exchange-rate
+
+# Cambiar 350 soles a dólares (cuenta para el límite diario)
+curl -i -X POST http://localhost:8082/api/exchange-rate/12345678/soles-a-dolares \
+  -H "Content-Type: application/json" \
+  -d '{"monto": 350.00}'
+
+# Cambiar 100 dólares a soles (cuenta para el mismo límite diario)
+curl -i -X POST http://localhost:8082/api/exchange-rate/12345678/dolares-a-soles \
+  -H "Content-Type: application/json" \
+  -d '{"monto": 100.00}'
 ```
 
 ---
@@ -356,13 +456,15 @@ curl -i http://localhost:8082/api/exchange-rate/12345678
 src/main/java/com/nttdata/ms/exchange/rate/
 ├── api/
 │   ├── CambioApi.java            # Cliente REST hacia free.e-api.net.pe
-│   ├── CambioController.java     # GET /api/exchange-rate/{dni}
+│   ├── CambioController.java     # GET /api/exchange-rate y los dos POST de cambio
 │   ├── ClienteController.java    # CRUD /api/cliente
-│   ├── dto/                      # ClienteRequest, ClienteResponse, CambioConsultaResponse, ApiError
-│   └── mapper/ClienteMapper.java # Entidad → DTO de respuesta
+│   ├── dto/                      # ClienteRequest/Response, CambioRequest, CambioConsultaResponse, ApiError
+│   └── mapper/                   # ClienteMapper, CambioMapper (dominio → DTO)
 ├── domain/
 │   ├── Cliente.java              # Entidad JPA
-│   ├── ConsultaCambio.java       # Entidad JPA (consultas_cambio)
+│   ├── ConsultaCambio.java       # Entidad JPA (consultas_cambio): operación de cambio registrada
+│   ├── DireccionCambio.java      # Enum: SOLES_A_DOLARES / DOLARES_A_SOLES
+│   ├── ResultadoCambio.java      # Operación + estado del límite diario
 │   └── CambioProxy.java          # Modelo de la respuesta externa
 ├── repository/                   # Repositorios Panache
 └── service/                      # CambioService, ClienteService (reglas de negocio)
@@ -382,13 +484,33 @@ quarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5432/postgres
 
 quarkus.hibernate-orm.database.generation=drop-and-create
 
+# limite de operaciones de cambio por cliente y por dia
 app.consultas.limite-diario=10
+
 quarkus.rest-client.exchange-rate.url=https://free.e-api.net.pe
 quarkus.rest-client.exchange-rate.connect-timeout=5000
 quarkus.rest-client.exchange-rate.read-timeout=5000
 ```
 
 ---
+
+## Reglas de negocio
+
+1. El tipo de cambio del día se consulta libremente en `GET /api/exchange-rate`: sin cliente y sin límite.
+2. Para **cambiar montos** el cliente debe estar registrado (`POST /api/cliente`).
+3. El tipo de cambio aplicado depende del sentido de la operación:
+
+   | Sentido | Tasa aplicada | Cálculo |
+   |---|---|---|
+   | `SOLES_A_DOLARES` (el cliente compra dólares) | `venta` | `montoDolares = montoSoles / venta` |
+   | `DOLARES_A_SOLES` (el cliente vende dólares) | `compra` | `montoSoles = montoDolares * compra` |
+
+   En los dos casos el resultado se redondea a 2 decimales con `HALF_UP`.
+4. Cada operación se registra en `consultas_cambio` con la dirección, los dos montos y la tasa
+   aplicada — y es lo que cuenta para el límite diario.
+5. El límite es de **10 operaciones por cliente y por día** (`app.consultas.limite-diario`), contadas
+   sobre el día calendario en `America/Lima`. **Las dos direcciones comparten el mismo contador.**
+   Al superarlo, la API responde `429`.
 
 ## Stack técnico
 
